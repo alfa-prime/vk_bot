@@ -2,15 +2,12 @@ import asyncio
 import re
 import vk_api
 from vk_api.upload import VkUpload
-from vk_api.exceptions import ApiHttpError, ApiError, VkApiError
-# Импортируем ошибки requests, так как vk_api использует их
+from vk_api.exceptions import ApiHttpError, ApiError
 from requests.exceptions import RequestException, ConnectionError, Timeout
-
 from loguru import logger
 from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_type
 from app.core.config import get_settings
 
-# Конфигурация для повторных попыток (Retries)
 RETRY_CONFIG = {
     "stop": stop_after_attempt(3),
     "wait": wait_fixed(2),
@@ -27,20 +24,16 @@ class VKService:
 
     @classmethod
     def start(cls):
-        """Авторизация и проверка соединения."""
         if cls._api is None:
             try:
                 settings = get_settings()
                 logger.info("VKService: Инициализация...")
-
                 cls._session = vk_api.VkApi(token=settings.VK_TOKEN.get_secret_value())
                 cls._api = cls._session.get_api()
-
                 cls._check_connection()
-
-                logger.info("VKService: Успешно подключено.")
+                logger.info("VKService: Готов.")
             except Exception as e:
-                logger.critical(f"VKService Critical Error: {e}")
+                logger.critical(f"VKService Error: {e}")
                 raise e
 
     @classmethod
@@ -50,30 +43,78 @@ class VKService:
 
     @staticmethod
     def parse_link(link: str):
-        match = re.search(r'album(-?\d+)_(\d+)', link)
-        if match:
-            return int(match.group(1)), match.group(2)
+        """
+        Умный парсинг ссылок.
+        Возвращает: (id_владельца, id_альбома)
+        """
+        # 1. Ссылки на раздел "Фотографии со мной" (vk.com/photos12345)
+        match_tagged = re.search(r'vk\.com/photos(\d+)', link)
+        if match_tagged:
+            return int(match_tagged.group(1)), 'tagged'
+
+        # 2. Ссылки на альбомы (vk.com/album-123_456)
+        match_album = re.search(r'album(-?\d+)_(\d+)', link)
+        if match_album:
+            owner_id = int(match_album.group(1))
+            album_str = match_album.group(2)
+
+            # Маппинг "браузерных" нулей в API-ключи
+            if album_str == '0':
+                return owner_id, 'profile'  # Фото профиля
+            elif album_str == '00':
+                return owner_id, 'wall'  # Фото со стены
+            elif album_str == '000':
+                return owner_id, 'saved'  # Сохраненные
+            else:
+                return owner_id, album_str  # Обычный альбом
+
         return None, None
 
-    # --- GET PHOTOS ---
+    # --- СКАЧИВАНИЕ ---
     @classmethod
     @retry(**RETRY_CONFIG)
     def _get_photos_sync(cls, owner_id: int, album_id: str):
         if cls._api is None: raise RuntimeError("VKService not started")
+
         urls = []
         offset = 0
         count = 1000
+
+        logger.info(f"Скачивание: owner={owner_id}, album={album_id}")
+
         while True:
-            response = cls._api.photos.get(
-                owner_id=owner_id, album_id=album_id, photo_sizes=1, offset=offset, count=count
-            )
+            # ЛОГИКА ВЫБОРА МЕТОДА
+            if album_id == 'tagged':
+                # Метод для отметок на фото
+                response = cls._api.photos.getUserPhotos(
+                    user_id=owner_id,
+                    sort='date',
+                    count=count,
+                    offset=offset,
+                    photo_sizes=1  # Важно, чтобы вернулись размеры
+                )
+            else:
+                # Стандартный метод для альбомов (profile, wall, saved, 12345)
+                response = cls._api.photos.get(
+                    owner_id=owner_id,
+                    album_id=album_id,
+                    photo_sizes=1,
+                    offset=offset,
+                    count=count
+                )
+
             items = response.get('items', [])
             if not items: break
+
             for item in items:
-                best_size = max(item['sizes'], key=lambda x: x['height'] * x['width'])
-                urls.append(best_size['url'])
+                # Иногда sizes нет (редкий баг ВК), проверяем
+                if 'sizes' in item:
+                    best = max(item['sizes'], key=lambda x: x['height'] * x['width'])
+                    urls.append(best['url'])
+
             offset += count
             if offset >= response['count']: break
+
         return urls
 
     @classmethod
@@ -81,10 +122,10 @@ class VKService:
         try:
             return await asyncio.to_thread(cls._get_photos_sync, owner_id, album_id)
         except Exception as e:
-            logger.error(f"Error getting album: {e}")
+            logger.error(f"Get photos error: {e}")
             return None
 
-    # --- UPLOAD TO ALBUM ---
+    # --- ЗАГРУЗКА В АЛЬБОМ ---
     @classmethod
     @retry(**RETRY_CONFIG)
     def _upload_album_sync(cls, file_objs: list, album_id: int, group_id: int = None):
@@ -98,22 +139,18 @@ class VKService:
         try:
             return await asyncio.to_thread(cls._upload_album_sync, file_objs, album_id, group_id)
         except Exception as e:
-            logger.error(f"Error uploading to album: {e}")
+            logger.error(f"Error uploading: {e}")
             raise e
 
-    # --- WALL POST ---
+    # --- POST WALL ---
     @classmethod
     @retry(**RETRY_CONFIG)
     def _upload_wall_sync(cls, file_objs: list, group_id: int = None):
         for f in file_objs:
             if hasattr(f, 'seek'): f.seek(0)
-
         upload = VkUpload(cls._session)
         photos = upload.photo_wall(photos=file_objs, group_id=group_id)
-
-        attachments = []
-        for p in photos:
-            attachments.append(f"photo{p['owner_id']}_{p['id']}")
+        attachments = [f"photo{p['owner_id']}_{p['id']}" for p in photos]
         return ",".join(attachments)
 
     @classmethod
@@ -126,15 +163,11 @@ class VKService:
         params = {
             "message": message,
             "attachments": attachments,
-            "dont_parse_links": 1,  # Не делать ссылки-сниппеты
-            "primary_attachments_mode": "grid"  # Принудительная сетка!
+            "dont_parse_links": 1,
+            "primary_attachments_mode": "grid"
         }
-
-        if owner_id:
-            params["owner_id"] = owner_id
-        if from_group:
-            params["from_group"] = 1
-
+        if owner_id: params["owner_id"] = owner_id
+        if from_group: params["from_group"] = 1
         return cls._api.wall.post(**params)
 
     @classmethod
