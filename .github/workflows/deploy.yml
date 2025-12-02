@@ -94,8 +94,8 @@ jobs:
           script: |
             cd /opt/social_media_bot
 
-            # Логинимся в GHCR прямо на сервере, используя токен GitHub Actions
-            echo ${{ secrets.GITHUB_TOKEN }} | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            # Используем ваш PAT (GH_PAT) для входа на сервере.
+            echo "${{ secrets.GH_PAT }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
             # Переименовываем конфиг, чтобы docker compose видел его по умолчанию
             mv docker-compose.prod.yml docker-compose.yml
