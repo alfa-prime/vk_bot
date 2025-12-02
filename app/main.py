@@ -11,6 +11,7 @@ from app.middlewares.album_middleware import AlbumMiddleware
 from app.handlers import common, vk_features
 
 
+
 async def setup_bot_commands(bot: Bot):
     """
     Определяем команды, которые будут видны в кнопке 'Меню'.

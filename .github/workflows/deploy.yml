@@ -6,11 +6,9 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  # Имя образа: ghcr.io/ваш_ник/ваш_репо
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  # 1. Проверка кода (Linter)
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -23,14 +21,11 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install flake8
-      # Проверяем код на синтаксические ошибки и стиль
-      # E501 игнорируем (длина строки), F401 (неиспользуемые импорты - бывает нужно для __init__)
       - name: Lint with flake8
         run: |
           flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
 
-  # 2. Сборка и публикация образа
   build-and-push:
     needs: lint
     runs-on: ubuntu-latest
@@ -41,6 +36,11 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      # Приводим имя образа к нижнему регистру (обязательно для GitHub)
+      - name: Lowercase IMAGE_NAME
+        run: |
+          echo "IMAGE_NAME=${IMAGE_NAME,,}" >>${GITHUB_ENV}
 
       - name: Log in to the Container registry
         uses: docker/login-action@v3
@@ -66,15 +66,14 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
-  # 3. Деплой на сервер
   deploy:
     needs: build-and-push
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      
-      # Копируем docker-compose.prod.yml на сервер
+
+      # 1. Копируем конфиг (docker-compose.prod.yml)
       - name: Copy docker-compose file via SCP
         uses: appleboy/scp-action@master
         with:
@@ -82,9 +81,10 @@ jobs:
           username: ${{ secrets.USERNAME }}
           key: ${{ secrets.SSH_KEY }}
           source: "docker-compose.prod.yml"
+          # ИСПРАВЛЕН ПУТЬ
           target: "/opt/social_media_bot/"
 
-      # Подключаемся по SSH и обновляем контейнер
+      # 2. Заходим по SSH, логинимся в реестр и обновляем
       - name: Deploy via SSH
         uses: appleboy/ssh-action@master
         with:
@@ -92,21 +92,19 @@ jobs:
           username: ${{ secrets.USERNAME }}
           key: ${{ secrets.SSH_KEY }}
           script: |
-            cd /opt/vk_bot
-            
-            # Переименовываем prod конфиг в основной (или используем -f)
+            cd /opt/social_media_bot
+
+            # Логинимся в GHCR прямо на сервере, используя токен GitHub Actions
+            echo ${{ secrets.GITHUB_TOKEN }} | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+            # Переименовываем конфиг, чтобы docker compose видел его по умолчанию
             mv docker-compose.prod.yml docker-compose.yml
-            
-            # Логинимся в GHCR на сервере (используем токен из шага, но проще сделать публичным пакет)
-            # Либо прокидываем GITHUB_TOKEN. 
-            # Самый простой способ для приватных пакетов - сгенерировать PAT (Personal Access Token) в GitHub
-            # и один раз выполнить на сервере: docker login ghcr.io -u USER -p PAT_TOKEN
-            
-            # Скачиваем новый образ
+
+            # Скачиваем свежий образ
             docker compose pull
-            
-            # Перезапускаем (up -d пересоздаст контейнер, если образ изменился)
+
+            # Перезапускаем контейнер
             docker compose up -d
-            
-            # Чистим старые образы, чтобы не забить диск
+
+            # Чистим старые образы
             docker image prune -f
