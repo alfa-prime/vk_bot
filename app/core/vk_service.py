@@ -43,33 +43,56 @@ class VKService:
 
     @staticmethod
     def parse_link(link: str):
-        """
-        Умный парсинг ссылок.
-        Возвращает: (id_владельца, id_альбома)
-        """
-        # 1. Ссылка на "Фото со мной" (вида vk.com/tag8301129)
-        # Ищем слово tag, за которым идут цифры
         match_tagged = re.search(r'tag(\d+)', link)
         if match_tagged:
             return int(match_tagged.group(1)), 'tagged'
 
-        # 2. Ссылки на альбомы (vk.com/album-123_456)
         match_album = re.search(r'album(-?\d+)_(\d+)', link)
         if match_album:
             owner_id = int(match_album.group(1))
             album_str = match_album.group(2)
-
-            # Маппинг "браузерных" нулей в API-ключи
             if album_str == '0':
-                return owner_id, 'profile'  # Фото профиля
+                return owner_id, 'profile'
             elif album_str == '00':
-                return owner_id, 'wall'  # Фото со стены
+                return owner_id, 'wall'
             elif album_str == '000':
-                return owner_id, 'saved'  # Сохраненные
+                return owner_id, 'saved'
             else:
-                return owner_id, album_str  # Обычный альбом
-
+                return owner_id, album_str
         return None, None
+
+    # --- НОВЫЙ МЕТОД ВЫБОРА РАЗМЕРА ---
+    @staticmethod
+    def _get_best_size(sizes: list) -> str:
+        """
+        Выбирает ссылку на фото максимального качества,
+        опираясь на приоритеты типов размеров ВК.
+        """
+        if not sizes:
+            return None
+
+        # Приоритет типов (w - самый большой, s - самый маленький)
+        # См. док: https://dev.vk.com/ru/reference/objects/photo-sizes
+        type_priority = {
+            'w': 10,  # Около 2560px
+            'z': 9,  # 1080x1024
+            'y': 8,  # 807x807
+            'x': 7,  # 604x604
+            'm': 6,  # 130x87
+            's': 5,  # 75x55
+            # Остальные (редкие типы)
+            'o': 4, 'p': 3, 'q': 2, 'r': 1
+        }
+
+        # Сортируем список:
+        # 1. Сначала по приоритету типа (если есть 'w', он победит)
+        # 2. Если типы одинаковые или неизвестные, то по площади (ширина * высота)
+        sizes.sort(key=lambda x: (
+            type_priority.get(x.get('type'), 0),
+            x.get('width', 0) * x.get('height', 0)
+        ), reverse=True)
+
+        return sizes[0]['url']
 
     # --- СКАЧИВАНИЕ ---
     @classmethod
@@ -81,37 +104,25 @@ class VKService:
         offset = 0
         count = 1000
 
-        logger.info(f"Скачивание: owner={owner_id}, album={album_id}")
-
         while True:
-            # ЛОГИКА ВЫБОРА МЕТОДА
             if album_id == 'tagged':
-                # Метод для отметок на фото
                 response = cls._api.photos.getUserPhotos(
-                    user_id=owner_id,
-                    sort='date',
-                    count=count,
-                    offset=offset,
-                    photo_sizes=1  # Важно, чтобы вернулись размеры
+                    user_id=owner_id, sort='date', count=count, offset=offset, photo_sizes=1
                 )
             else:
-                # Стандартный метод для альбомов (profile, wall, saved, 12345)
                 response = cls._api.photos.get(
-                    owner_id=owner_id,
-                    album_id=album_id,
-                    photo_sizes=1,
-                    offset=offset,
-                    count=count
+                    owner_id=owner_id, album_id=album_id, photo_sizes=1, offset=offset, count=count
                 )
 
             items = response.get('items', [])
             if not items: break
 
             for item in items:
-                # Иногда sizes нет (редкий баг ВК), проверяем
                 if 'sizes' in item:
-                    best = max(item['sizes'], key=lambda x: x['height'] * x['width'])
-                    urls.append(best['url'])
+                    # Используем новый метод выбора
+                    best_url = cls._get_best_size(item['sizes'])
+                    if best_url:
+                        urls.append(best_url)
 
             offset += count
             if offset >= response['count']: break
@@ -126,7 +137,7 @@ class VKService:
             logger.error(f"Get photos error: {e}")
             return None
 
-    # --- ЗАГРУЗКА В АЛЬБОМ ---
+    # --- ЗАГРУЗКА И ПОСТИНГ (ОСТАЮТСЯ КАК БЫЛИ) ---
     @classmethod
     @retry(**RETRY_CONFIG)
     def _upload_album_sync(cls, file_objs: list, album_id: int, group_id: int = None):
@@ -143,7 +154,6 @@ class VKService:
             logger.error(f"Error uploading: {e}")
             raise e
 
-    # --- POST WALL ---
     @classmethod
     @retry(**RETRY_CONFIG)
     def _upload_wall_sync(cls, file_objs: list, group_id: int = None):
@@ -151,8 +161,7 @@ class VKService:
             if hasattr(f, 'seek'): f.seek(0)
         upload = VkUpload(cls._session)
         photos = upload.photo_wall(photos=file_objs, group_id=group_id)
-        attachments = [f"photo{p['owner_id']}_{p['id']}" for p in photos]
-        return ",".join(attachments)
+        return ",".join([f"photo{p['owner_id']}_{p['id']}" for p in photos])
 
     @classmethod
     async def upload_wall_photos(cls, file_objs: list, group_id: int = None):
@@ -162,10 +171,8 @@ class VKService:
     @retry(**RETRY_CONFIG)
     def _post_wall_sync(cls, message: str, attachments: str, owner_id: int = None, from_group: bool = False):
         params = {
-            "message": message,
-            "attachments": attachments,
-            "dont_parse_links": 1,
-            "primary_attachments_mode": "grid"
+            "message": message, "attachments": attachments,
+            "dont_parse_links": 1, "primary_attachments_mode": "grid"
         }
         if owner_id: params["owner_id"] = owner_id
         if from_group: params["from_group"] = 1
