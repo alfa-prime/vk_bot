@@ -1,0 +1,12 @@
+services:
+  vk_bot:
+    image: ghcr.io/alfa-prime/vk_bot:latest
+    container_name: vk_bot_container
+    restart: always
+    env_file:
+      - .env
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

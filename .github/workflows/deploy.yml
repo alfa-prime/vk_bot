@@ -1,0 +1,112 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+
+env:
+  REGISTRY: ghcr.io
+  # Имя образа: ghcr.io/ваш_ник/ваш_репо
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # 1. Проверка кода (Linter)
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install flake8
+      # Проверяем код на синтаксические ошибки и стиль
+      # E501 игнорируем (длина строки), F401 (неиспользуемые импорты - бывает нужно для __init__)
+      - name: Lint with flake8
+        run: |
+          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+
+  # 2. Сборка и публикация образа
+  build-and-push:
+    needs: lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest
+            type=sha,prefix=,format=short
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  # 3. Деплой на сервер
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      # Копируем docker-compose.prod.yml на сервер
+      - name: Copy docker-compose file via SCP
+        uses: appleboy/scp-action@master
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USERNAME }}
+          key: ${{ secrets.SSH_KEY }}
+          source: "docker-compose.prod.yml"
+          target: "/opt/social_media_bot/"
+
+      # Подключаемся по SSH и обновляем контейнер
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USERNAME }}
+          key: ${{ secrets.SSH_KEY }}
+          script: |
+            cd /opt/vk_bot
+            
+            # Переименовываем prod конфиг в основной (или используем -f)
+            mv docker-compose.prod.yml docker-compose.yml
+            
+            # Логинимся в GHCR на сервере (используем токен из шага, но проще сделать публичным пакет)
+            # Либо прокидываем GITHUB_TOKEN. 
+            # Самый простой способ для приватных пакетов - сгенерировать PAT (Personal Access Token) в GitHub
+            # и один раз выполнить на сервере: docker login ghcr.io -u USER -p PAT_TOKEN
+            
+            # Скачиваем новый образ
+            docker compose pull
+            
+            # Перезапускаем (up -d пересоздаст контейнер, если образ изменился)
+            docker compose up -d
+            
+            # Чистим старые образы, чтобы не забить диск
+            docker image prune -f
