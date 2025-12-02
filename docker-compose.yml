@@ -1,0 +1,14 @@
+services:
+  vk_bot:
+    build: .
+    container_name: vk_bot_container
+    restart: unless-stopped
+    # Пробрасываем переменные окружения из .env внутрь контейнера
+    env_file:
+      - .env
+    # Настройка логирования, чтобы логи не занимали всё место
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
