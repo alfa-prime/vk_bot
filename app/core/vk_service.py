@@ -47,8 +47,9 @@ class VKService:
         Умный парсинг ссылок.
         Возвращает: (id_владельца, id_альбома)
         """
-        # 1. Ссылки на раздел "Фотографии со мной" (vk.com/photos12345)
-        match_tagged = re.search(r'vk\.com/photos(\d+)', link)
+        # 1. Ссылка на "Фото со мной" (вида vk.com/tag8301129)
+        # Ищем слово tag, за которым идут цифры
+        match_tagged = re.search(r'tag(\d+)', link)
         if match_tagged:
             return int(match_tagged.group(1)), 'tagged'
 
